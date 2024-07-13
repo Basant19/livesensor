@@ -1,9 +1,12 @@
-from setuptools import find_packages ,setup
+from setuptools import find_packages , setup
 from typing import List
 
-def get_requirements()->list[str]:
-    requirements_list=list[str]=[]
+
+
+def get_requirements()->List[str]:
+    requirements_list:List[str]=[]
     return requirements_list
+
 
 setup (
     name='sensor',
@@ -12,5 +15,4 @@ setup (
     author_email='btirkey1208@gmail.com',
     packages=find_packages(),
     install_requires=get_requirements()
-    
 )
