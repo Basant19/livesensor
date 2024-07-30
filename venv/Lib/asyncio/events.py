@@ -1,5 +1,9 @@
 """Event loop and event loop policy."""
 
+# Contains code from https://github.com/MagicStack/uvloop/tree/v0.16.0
+# SPDX-License-Identifier: PSF-2.0 AND (MIT OR Apache-2.0)
+# SPDX-FileCopyrightText: Copyright (c) 2015-2021 MagicStack Inc.  http://magic.io
+
 __all__ = (
     'AbstractEventLoopPolicy',
     'AbstractEventLoop', 'AbstractServer',
@@ -613,7 +617,7 @@ class AbstractEventLoopPolicy:
     def get_event_loop(self):
         """Get the event loop for the current context.
 
-        Returns an event loop object implementing the BaseEventLoop interface,
+        Returns an event loop object implementing the AbstractEventLoop interface,
         or raises an exception in case no event loop has been set for the
         current context and the current policy does not specify to create one.
 

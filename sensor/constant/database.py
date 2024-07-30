@@ -1,0 +1,2 @@
+DATABASE_NAME = "Basant"
+COLLECTION_NAME = "sensor"

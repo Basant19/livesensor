@@ -1,9 +1,6 @@
 """
 The typing module: Support for gradual typing as defined by PEP 484 and subsequent PEPs.
 
-Any name not present in __all__ is an implementation detail
-that may be changed without notice. Use at your own risk!
-
 Among other things, the module includes the following:
 * Generic, Protocol, and internal machinery to support generic aliases.
   All subscripted types like X[int], Union[int, str] are generic aliases.
@@ -17,6 +14,9 @@ Among other things, the module includes the following:
 * Special types: NewType, NamedTuple, TypedDict.
 * Deprecated wrapper submodules for re and io related types.
 * Deprecated aliases for builtin types and collections.abc ABCs.
+
+Any name not present in __all__ is an implementation detail
+that may be changed without notice. Use at your own risk!
 """
 
 from abc import abstractmethod, ABCMeta
@@ -207,10 +207,16 @@ def _should_unflatten_callable_args(typ, args):
     """Internal helper for munging collections.abc.Callable's __args__.
 
     The canonical representation for a Callable's __args__ flattens the
-    argument types, see https://bugs.python.org/issue42195. For example::
+    argument types, see https://github.com/python/cpython/issues/86361.
 
-        collections.abc.Callable[[int, int], str].__args__ == (int, int, str)
-        collections.abc.Callable[ParamSpec, str].__args__ == (ParamSpec, str)
+    For example::
+
+        >>> import collections.abc
+        >>> P = ParamSpec('P')
+        >>> collections.abc.Callable[[int, int], str].__args__ == (int, int, str)
+        True
+        >>> collections.abc.Callable[P, str].__args__ == (P, str)
+        True
 
     As a result, if we need to reconstruct the Callable from its __args__,
     we need to unflatten it.
@@ -248,7 +254,10 @@ def _collect_parameters(args):
 
     For example::
 
-        assert _collect_parameters((T, Callable[P, T])) == (T, P)
+        >>> P = ParamSpec('P')
+        >>> T = TypeVar('T')
+        >>> _collect_parameters((T, Callable[P, T]))
+        (~T, ~P)
     """
     parameters = []
     for t in args:
@@ -294,19 +303,33 @@ def _unpack_args(args):
             newargs.append(arg)
     return newargs
 
-def _deduplicate(params):
+def _deduplicate(params, *, unhashable_fallback=False):
     # Weed out strict duplicates, preserving the first of each occurrence.
-    all_params = set(params)
-    if len(all_params) < len(params):
-        new_params = []
-        for t in params:
-            if t in all_params:
-                new_params.append(t)
-                all_params.remove(t)
-        params = new_params
-        assert not all_params, all_params
-    return params
+    try:
+        return dict.fromkeys(params)
+    except TypeError:
+        if not unhashable_fallback:
+            raise
+        # Happens for cases like `Annotated[dict, {'x': IntValidator()}]`
+        return _deduplicate_unhashable(params)
 
+def _deduplicate_unhashable(unhashable_params):
+    new_unhashable = []
+    for t in unhashable_params:
+        if t not in new_unhashable:
+            new_unhashable.append(t)
+    return new_unhashable
+
+def _compare_args_orderless(first_args, second_args):
+    first_unhashable = _deduplicate_unhashable(first_args)
+    second_unhashable = _deduplicate_unhashable(second_args)
+    t = list(second_unhashable)
+    try:
+        for elem in first_unhashable:
+            t.remove(elem)
+    except ValueError:
+        return False
+    return not t
 
 def _remove_dups_flatten(parameters):
     """Internal helper for Union creation and substitution.
@@ -321,7 +344,7 @@ def _remove_dups_flatten(parameters):
         else:
             params.append(p)
 
-    return tuple(_deduplicate(params))
+    return tuple(_deduplicate(params, unhashable_fallback=True))
 
 
 def _flatten_literal_params(parameters):
@@ -339,8 +362,9 @@ _cleanups = []
 
 
 def _tp_cache(func=None, /, *, typed=False):
-    """Internal wrapper caching __getitem__ of generic types with a fallback to
-    original function for non-hashable arguments.
+    """Internal wrapper caching __getitem__ of generic types.
+
+    For non-hashable arguments, the original function is used as a fallback.
     """
     def decorator(func):
         cached = functools.lru_cache(typed=typed)(func)
@@ -512,7 +536,7 @@ class Any(metaclass=_AnyMeta):
     def __new__(cls, *args, **kwargs):
         if cls is Any:
             raise TypeError("Any cannot be instantiated")
-        return super().__new__(cls, *args, **kwargs)
+        return super().__new__(cls)
 
 
 @_SpecialForm
@@ -556,7 +580,7 @@ def Never(self, parameters):
                 case str():
                     print("It's a str")
                 case _:
-                    never_call_me(arg)  # ok, arg is of type Never
+                    never_call_me(arg)  # OK, arg is of type Never
     """
     raise TypeError(f"{self} is not subscriptable")
 
@@ -589,13 +613,13 @@ def LiteralString(self, parameters):
 
         from typing import LiteralString
 
-        def run_query(sql: LiteralString) -> ...
+        def run_query(sql: LiteralString) -> None:
             ...
 
         def caller(arbitrary_string: str, literal_string: LiteralString) -> None:
-            run_query("SELECT * FROM students")  # ok
-            run_query(literal_string)  # ok
-            run_query("SELECT * FROM " + literal_string)  # ok
+            run_query("SELECT * FROM students")  # OK
+            run_query(literal_string)  # OK
+            run_query("SELECT * FROM " + literal_string)  # OK
             run_query(arbitrary_string)  # type checker error
             run_query(  # type checker error
                 f"SELECT * FROM students WHERE name = {arbitrary_string}"
@@ -614,10 +638,12 @@ def ClassVar(self, parameters):
 
     An annotation wrapped in ClassVar indicates that a given
     attribute is intended to be used as a class variable and
-    should not be set on instances of that class. Usage::
+    should not be set on instances of that class.
+
+    Usage::
 
         class Starship:
-            stats: ClassVar[Dict[str, int]] = {} # class variable
+            stats: ClassVar[dict[str, int]] = {} # class variable
             damage: int = 10                     # instance variable
 
     ClassVar accepts only types and cannot be further subscribed.
@@ -741,7 +767,9 @@ def TypeAlias(self, parameters):
 
     Use TypeAlias to indicate that an assignment should
     be recognized as a proper type alias definition by type
-    checkers. For example::
+    checkers.
+
+    For example::
 
         Predicate: TypeAlias = Callable[..., bool]
 
@@ -754,8 +782,8 @@ def TypeAlias(self, parameters):
 def Concatenate(self, parameters):
     """Special form for annotating higher-order functions.
 
-    ``Concatenate`` can be sed in conjunction with ``ParamSpec`` and
-    ``Callable`` to represent a higher order function which adds, removes or
+    ``Concatenate`` can be used in conjunction with ``ParamSpec`` and
+    ``Callable`` to represent a higher-order function which adds, removes or
     transforms the parameters of a callable.
 
     For example::
@@ -842,7 +870,7 @@ class ForwardRef(_Final, _root=True):
         # If we do `def f(*args: *Ts)`, then we'll have `arg = '*Ts'`.
         # Unfortunately, this isn't a valid expression on its own, so we
         # do the unpacking manually.
-        if arg[0] == '*':
+        if arg.startswith('*'):
             arg_to_compile = f'({arg},)[0]'  # E.g. (*Ts,)[0] or (*tuple[int, int],)[0]
         else:
             arg_to_compile = arg
@@ -1261,7 +1289,9 @@ class _BaseGenericAlias(_Final, _root=True):
         result = self.__origin__(*args, **kwargs)
         try:
             result.__orig_class__ = self
-        except AttributeError:
+        # Some objects raise TypeError (or something even more exotic)
+        # if you try to set attributes on them; we guard against that here
+        except Exception:
             pass
         return result
 
@@ -1657,7 +1687,10 @@ class _UnionGenericAlias(_NotIterable, _GenericAlias, _root=True):
     def __eq__(self, other):
         if not isinstance(other, (_UnionGenericAlias, types.UnionType)):
             return NotImplemented
-        return set(self.__args__) == set(other.__args__)
+        try:  # fast path
+            return set(self.__args__) == set(other.__args__)
+        except TypeError:  # not hashable, slow path
+            return _compare_args_orderless(self.__args__, other.__args__)
 
     def __hash__(self):
         return hash(frozenset(self.__args__))
@@ -1713,8 +1746,9 @@ def Unpack(self, parameters):
     """Type unpack operator.
 
     The type unpack operator takes the child types from some container type,
-    such as `tuple[int, str]` or a `TypeVarTuple`, and 'pulls them out'. For
-    example::
+    such as `tuple[int, str]` or a `TypeVarTuple`, and 'pulls them out'.
+
+    For example::
 
         # For some generic class `Foo`:
         Foo[Unpack[tuple[int, str]]]  # Equivalent to Foo[int, str]
@@ -1883,7 +1917,7 @@ class _TypingEllipsis:
 
 
 _TYPING_INTERNALS = ['__parameters__', '__orig_bases__',  '__orig_class__',
-                     '_is_protocol', '_is_runtime_protocol']
+                     '_is_protocol', '_is_runtime_protocol', '__final__']
 
 _SPECIAL_NAMES = ['__abstractmethods__', '__annotations__', '__dict__', '__doc__',
                   '__init__', '__module__', '__new__', '__slots__',
@@ -2007,7 +2041,9 @@ class Protocol(Generic, metaclass=_ProtocolMeta):
                 ...
 
     Such classes are primarily used with static type checkers that recognize
-    structural subtyping (static duck-typing), for example::
+    structural subtyping (static duck-typing).
+
+    For example::
 
         class C:
             def meth(self) -> int:
@@ -2163,7 +2199,7 @@ class Annotated:
 
         assert Annotated[int, '$'].__metadata__ == ('$',)
 
-    - Nested Annotated are flattened::
+    - Nested Annotated types are flattened::
 
         assert Annotated[Annotated[T, Ann1, Ann2], Ann3] == Annotated[T, Ann1, Ann2, Ann3]
 
@@ -2174,17 +2210,17 @@ class Annotated:
 
     - Annotated can be used as a generic type alias::
 
-        Optimized = Annotated[T, runtime.Optimize()]
+        Optimized: TypeAlias = Annotated[T, runtime.Optimize()]
         assert Optimized[int] == Annotated[int, runtime.Optimize()]
 
-        OptimizedList = Annotated[List[T], runtime.Optimize()]
-        assert OptimizedList[int] == Annotated[List[int], runtime.Optimize()]
+        OptimizedList: TypeAlias = Annotated[list[T], runtime.Optimize()]
+        assert OptimizedList[int] == Annotated[list[int], runtime.Optimize()]
 
     - Annotated cannot be used with an unpacked TypeVarTuple::
 
-        Annotated[*Ts, Ann1]  # NOT valid
+        Variadic: TypeAlias = Annotated[*Ts, Ann1]  # NOT valid
 
-      This would be equivalent to
+      This would be equivalent to::
 
         Annotated[T1, T2, T3, ..., Ann1]
 
@@ -2197,9 +2233,14 @@ class Annotated:
     def __new__(cls, *args, **kwargs):
         raise TypeError("Type Annotated cannot be instantiated.")
 
-    @_tp_cache
     def __class_getitem__(cls, params):
-        if not isinstance(params, tuple) or len(params) < 2:
+        if not isinstance(params, tuple):
+            params = (params,)
+        return cls._class_getitem_inner(cls, *params)
+
+    @_tp_cache(typed=True)
+    def _class_getitem_inner(cls, *params):
+        if len(params) < 2:
             raise TypeError("Annotated[...] should be used "
                             "with at least two arguments (a type and an "
                             "annotation).")
@@ -2264,7 +2305,7 @@ def assert_type(val, typ, /):
     emits an error if the value is not of the specified type::
 
         def greet(name: str) -> None:
-            assert_type(name, str)  # ok
+            assert_type(name, str)  # OK
             assert_type(name, int)  # type checker error
     """
     return val
@@ -2402,17 +2443,20 @@ def _strip_annotations(t):
 def get_origin(tp):
     """Get the unsubscripted version of a type.
 
-    This supports generic types, Callable, Tuple, Union, Literal, Final, ClassVar
-    Annotated, and others. Return None for unsupported types. Examples::
+    This supports generic types, Callable, Tuple, Union, Literal, Final, ClassVar,
+    Annotated, and others. Return None for unsupported types.
 
-        assert get_origin(Literal[42]) is Literal
-        assert get_origin(int) is None
-        assert get_origin(ClassVar[int]) is ClassVar
-        assert get_origin(Generic) is Generic
-        assert get_origin(Generic[T]) is Generic
-        assert get_origin(Union[T, int]) is Union
-        assert get_origin(List[Tuple[T, T]][int]) is list
-        assert get_origin(P.args) is P
+    Examples::
+
+        >>> P = ParamSpec('P')
+        >>> assert get_origin(Literal[42]) is Literal
+        >>> assert get_origin(int) is None
+        >>> assert get_origin(ClassVar[int]) is ClassVar
+        >>> assert get_origin(Generic) is Generic
+        >>> assert get_origin(Generic[T]) is Generic
+        >>> assert get_origin(Union[T, int]) is Union
+        >>> assert get_origin(List[Tuple[T, T]][int]) is list
+        >>> assert get_origin(P.args) is P
     """
     if isinstance(tp, _AnnotatedAlias):
         return Annotated
@@ -2433,11 +2477,12 @@ def get_args(tp):
 
     Examples::
 
-        assert get_args(Dict[str, int]) == (str, int)
-        assert get_args(int) == ()
-        assert get_args(Union[int, Union[T, int], str][int]) == (int, str)
-        assert get_args(Union[int, Tuple[T, int]][str]) == (int, Tuple[str, int])
-        assert get_args(Callable[[], T][int]) == ([], int)
+        >>> T = TypeVar('T')
+        >>> assert get_args(Dict[str, int]) == (str, int)
+        >>> assert get_args(int) == ()
+        >>> assert get_args(Union[int, Union[T, int], str][int]) == (int, str)
+        >>> assert get_args(Union[int, Tuple[T, int]][str]) == (int, Tuple[str, int])
+        >>> assert get_args(Callable[[], T][int]) == ([], int)
     """
     if isinstance(tp, _AnnotatedAlias):
         return (tp.__origin__,) + tp.__metadata__
@@ -2456,12 +2501,15 @@ def is_typeddict(tp):
 
     For example::
 
-        class Film(TypedDict):
-            title: str
-            year: int
-
-        is_typeddict(Film)              # => True
-        is_typeddict(Union[list, str])  # => False
+        >>> from typing import TypedDict
+        >>> class Film(TypedDict):
+        ...     title: str
+        ...     year: int
+        ...
+        >>> is_typeddict(Film)
+        True
+        >>> is_typeddict(dict)
+        False
     """
     return isinstance(tp, _TypedDictMeta)
 
@@ -2562,7 +2610,9 @@ def overload(func):
     """Decorator for overloaded functions/methods.
 
     In a stub file, place two or more stub definitions for the same
-    function in a row, each decorated with @overload.  For example::
+    function in a row, each decorated with @overload.
+
+    For example::
 
         @overload
         def utf8(value: None) -> None: ...
@@ -2573,7 +2623,7 @@ def overload(func):
 
     In a non-stub file (i.e. a regular .py file), do the same but
     follow it with an implementation.  The implementation should *not*
-    be decorated with @overload.  For example::
+    be decorated with @overload::
 
         @overload
         def utf8(value: None) -> None: ...
@@ -2685,11 +2735,13 @@ Callable = _CallableType(collections.abc.Callable, 2)
 Callable.__doc__ = \
     """Deprecated alias to collections.abc.Callable.
 
-    Callable[[int], str] signifies a function of (int) -> str.
+    Callable[[int], str] signifies a function that takes a single
+    parameter of type int and returns a str.
+
     The subscription syntax must always be used with exactly two
     values: the argument list and the return type.
-    The argument list must be a list of types, a ParamSpec or ellipsis.
-    The return type must be a single type.
+    The argument list must be a list of types, a ParamSpec,
+    Concatenate or ellipsis. The return type must be a single type.
 
     There is no syntax to indicate optional or keyword arguments;
     such function types are rarely used as callback types.
@@ -2959,8 +3011,14 @@ class _TypedDictMeta(type):
 
         for base in bases:
             annotations.update(base.__dict__.get('__annotations__', {}))
-            required_keys.update(base.__dict__.get('__required_keys__', ()))
-            optional_keys.update(base.__dict__.get('__optional_keys__', ()))
+
+            base_required = base.__dict__.get('__required_keys__', set())
+            required_keys |= base_required
+            optional_keys -= base_required
+
+            base_optional = base.__dict__.get('__optional_keys__', set())
+            required_keys -= base_optional
+            optional_keys |= base_optional
 
         annotations.update(own_annotations)
         for annotation_key, annotation_type in own_annotations.items():
@@ -2972,14 +3030,23 @@ class _TypedDictMeta(type):
                     annotation_origin = get_origin(annotation_type)
 
             if annotation_origin is Required:
-                required_keys.add(annotation_key)
+                is_required = True
             elif annotation_origin is NotRequired:
-                optional_keys.add(annotation_key)
-            elif total:
+                is_required = False
+            else:
+                is_required = total
+
+            if is_required:
                 required_keys.add(annotation_key)
+                optional_keys.discard(annotation_key)
             else:
                 optional_keys.add(annotation_key)
+                required_keys.discard(annotation_key)
 
+        assert required_keys.isdisjoint(optional_keys), (
+            f"Required keys overlap with optional keys in {name}:"
+            f" {required_keys=}, {optional_keys=}"
+        )
         tp_dict.__annotations__ = annotations
         tp_dict.__required_keys__ = frozenset(required_keys)
         tp_dict.__optional_keys__ = frozenset(optional_keys)
@@ -3006,15 +3073,15 @@ def TypedDict(typename, fields=None, /, *, total=True, **kwargs):
 
     Usage::
 
-        class Point2D(TypedDict):
-            x: int
-            y: int
-            label: str
-
-        a: Point2D = {'x': 1, 'y': 2, 'label': 'good'}  # OK
-        b: Point2D = {'z': 3, 'label': 'bad'}           # Fails type check
-
-        assert Point2D(x=1, y=2, label='first') == dict(x=1, y=2, label='first')
+        >>> class Point2D(TypedDict):
+        ...     x: int
+        ...     y: int
+        ...     label: str
+        ...
+        >>> a: Point2D = {'x': 1, 'y': 2, 'label': 'good'}  # OK
+        >>> b: Point2D = {'z': 3, 'label': 'bad'}           # Fails type check
+        >>> Point2D(x=1, y=2, label='first') == dict(x=1, y=2, label='first')
+        True
 
     The type info can be accessed via the Point2D.__annotations__ dict, and
     the Point2D.__required_keys__ and Point2D.__optional_keys__ frozensets.
@@ -3073,7 +3140,9 @@ TypedDict.__mro_entries__ = lambda bases: (_TypedDict,)
 def Required(self, parameters):
     """Special typing construct to mark a TypedDict key as required.
 
-    This is mainly useful for total=False TypedDicts. For example::
+    This is mainly useful for total=False TypedDicts.
+
+    For example::
 
         class Movie(TypedDict, total=False):
             title: Required[str]
@@ -3115,7 +3184,9 @@ class NewType:
 
     NewType(name, tp) is considered a subtype of tp
     by static type checkers. At runtime, NewType(name, tp) returns
-    a dummy callable that simply returns its argument. Usage::
+    a dummy callable that simply returns its argument.
+
+    Usage::
 
         UserId = NewType('UserId', int)
 
@@ -3328,7 +3399,7 @@ class TextIO(IO[str]):
 
 class _DeprecatedType(type):
     def __getattribute__(cls, name):
-        if name not in ("__dict__", "__module__") and name in cls.__dict__:
+        if name not in {"__dict__", "__module__", "__doc__"} and name in cls.__dict__:
             warnings.warn(
                 f"{cls.__name__} is deprecated, import directly "
                 f"from typing instead. {cls.__name__} will be removed "
@@ -3367,7 +3438,7 @@ sys.modules[re.__name__] = re
 
 
 def reveal_type(obj: T, /) -> T:
-    """Reveal the inferred type of a variable.
+    """Ask a static type checker to reveal the inferred type of an expression.
 
     When a static type checker encounters a call to ``reveal_type()``,
     it will emit the inferred type of the argument::
@@ -3379,7 +3450,7 @@ def reveal_type(obj: T, /) -> T:
     will produce output similar to 'Revealed type is "builtins.int"'.
 
     At runtime, the function prints the runtime type of the
-    argument and returns it unchanged.
+    argument and returns the argument unchanged.
     """
     print(f"Runtime type is {type(obj).__name__!r}", file=sys.stderr)
     return obj

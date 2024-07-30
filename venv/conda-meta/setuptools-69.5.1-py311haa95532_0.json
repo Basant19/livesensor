@@ -4020,7 +4020,7 @@
     ],
     "paths_version": 1
   },
-  "requested_spec": "None",
+  "requested_spec": "setuptools",
   "sha256": "44713c7a9ad2949dcb2b40c5af8c7714deef9b4a9baf563e6a14e50f75e79754",
   "size": 1391788,
   "subdir": "win-64",

@@ -891,7 +891,7 @@
     ],
     "paths_version": 1
   },
-  "requested_spec": "None",
+  "requested_spec": "vs2015_runtime",
   "sha256": "f80810347ad5d8fb2d924522ddba2c8fb15182ba3f08fde9bf068bdd4a4e3001",
   "size": 1141406,
   "subdir": "win-64",
